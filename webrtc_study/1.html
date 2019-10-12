@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>通过摄像头捕捉视频本地显示</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue/dist/vue.js"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+</head>
+
+<body>
+    <div id="root" style="width:100%;">
+        <div>
+            <div style="color: #a00;font-size: 1em">日志信息:</div>
+            <div style="color: #f00;font-size: 1em">{{msg}}</div>
+        </div>
+        <button @click="start">开始捕捉</button>
+        <div>
+            <div style="width: 50%">
+                <video id="localVideo" autoplay></video>
+            </div>
+            <div style="width: 50%">
+                <video id="remoteVideo" autoplay></video>
+            </div>
+        </div>
+    </div>
+    <script>
+        let log = msg => {
+            console.log(msg)
+            root.msg = msg;
+        }
+        var root = new Vue({
+            el: '#root',
+            data: {
+                msg: ''
+            },
+            created: function () {
+                log('初始化')
+            },
+            methods: {
+                start: function () {
+                    log('开始捕捉')
+                    navigator.mediaDevices.getUserMedia({ audio: true, video: true })
+                        .then(function (stream) {
+                            log('捕捉成功')
+                            var localVideo = document.getElementById('localVideo');
+                            localVideo.srcObject = stream
+                        })
+                        .catch(function (err) {
+                            //alert('getUserMedia() error: ' + err.name);
+                            log("捕捉失败:" + err.name)
+                        })
+                }
+            }
+        })
+    </script>
+</body>
+
+</html>

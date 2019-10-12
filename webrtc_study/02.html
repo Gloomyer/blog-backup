@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>通过摄像头捕捉视频本地显示</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue/dist/vue.js"></script>
+</head>
+
+<body>
+    <div id="root" style="width:100%;">
+        <div>
+            <div style="color: #a00;font-size: 1em">日志信息:</div>
+            <div style="color: #f00;font-size: 1em">{{msg}}</div>
+        </div>
+        <button @click="start">获取</button>
+    </div>
+    <script>
+        var mylog = function (msg) {
+            console.log(msg)
+            root.msg = msg
+        }
+        var root = new Vue({
+            el: '#root',
+            data: {
+                msg: ''
+            },
+            created: function () {
+            },
+            methods: {
+                start: function () {
+                    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+                        mylog("不支持 enumerateDevices()");
+                        return;
+                    }
+                    mylog('开始获取')
+                    navigator.mediaDevices.enumerateDevices()
+                        .then(devices => {
+                            mylog('获取成功:' + JSON.stringify(devices))
+                        })
+                        .catch(function (err) {
+                            mylog("捕捉失败:" + err.name)
+                        })
+                }
+            }
+        })
+    </script>
+</body>
+
+</html>
