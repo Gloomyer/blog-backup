@@ -1,6 +1,5 @@
 ---
-title: categories
-date: 2017-04-13 03:22:04
-type: categories
+title: 分类
+layout: categories
 comments: false
 ---
