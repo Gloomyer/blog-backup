@@ -129,7 +129,6 @@ PostUp = iptables -A FORWARD -i wg0 -o eth0 -j ACCEPT; iptables -A FORWARD -i et
 PreDown =
 PostDown = iptables -D FORWARD -i wg0 -o eth0 -j ACCEPT; iptables -D FORWARD -i eth0 -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE; ip route del 10.30.0.0/24 via 10.20.0.2 dev wg0
 
-Table = auto
 ```
 
 ---
