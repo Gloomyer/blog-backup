@@ -1,0 +1,184 @@
+---
+title: 如何配置 WireGuard 穿透 Docker 网络
+date: 2025-10-29 02:49:53
+tags: [RockyLinux, WireGuard, Docker]
+---
+
+## 前言
+
+有一台家用 NAS，内部利用 Docker 启用了很多服务。NAS 物理机器通过 WireGuard 挂载到公网服务器上。
+
+希望 NAS 内部的 Docker 服务能够通过公网访问。由于映射端口需要管理大量服务端口比较麻烦，所以直接通过 iptables 转发来实现。
+
+---
+
+## 基础架构
+
+**gateway（公网服务器）Docker 网络**
+- nginx -> 10.10.0.2  
+- wireguard-server -> 10.10.0.3 / WireGuard 网络网关 10.20.0.1
+
+**nas（家用服务器）**
+- WireGuard（安装在物理机器上），获得的 IP 是 10.20.0.2  
+- Docker 网络  
+  - 10.30.0.2 任意服务
+
+现在希望能在 nginx 中访问到 10.30.0.2。
+
+整体架构依托于 **iptables + WireGuard**，WireGuard 使用 **wireguard-ui** 管理。
+
+---
+
+## 详细实现
+
+> ⚠️ **物理机器务必开启 IP 转发！**
+
+### nginx
+
+nginx 并不知道如何访问 `10.20.0.0/24` 和 `10.30.0.0/24` 网络，因此需要在 nginx 上做一些额外配置。
+
+原始的 nginx 镜像不满足我的需求，我除了需要端口映射，还需要开启 stream 转发，所以自己编译了 nginx 镜像：
+
+```Dockerfile
+FROM debian:bookworm-slim
+
+# 创建 nginx 用户组和用户
+RUN groupadd --system --gid 101 nginx \
+    && useradd --system --gid nginx --no-create-home --home /nonexistent --comment "nginx user" --uid 101 nginx
+
+# 安装必要的工具和库
+RUN apt-get update \
+    && apt-get install --no-install-recommends --no-install-suggests -y \
+    wget gcc g++ libpcre3 libpcre3-dev zlib1g zlib1g-dev openssl libssl-dev make \
+    iputils-ping curl iproute2 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# 下载并解压 Nginx 源码
+RUN wget http://nginx.org/download/nginx-1.28.0.tar.gz \
+    && tar -zxvf nginx-1.28.0.tar.gz \
+    && rm nginx-1.28.0.tar.gz
+
+# 编译并安装 Nginx
+RUN cd nginx-1.28.0 \
+    && ./configure --prefix=/home/nginx --with-stream --with-http_ssl_module \
+    && make && make install \
+    && mkdir -p /home/nginx/confs
+
+# 清理源码目录
+RUN rm -rf nginx-1.28.0
+
+# 复制自定义配置
+COPY nginx.conf /home/nginx/conf/nginx.conf
+
+# 创建启动脚本
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+```
+
+```bash
+#!/bin/bash
+set -e
+echo "==================================="
+echo "Nginx Gateway Container Starting..."
+echo "==================================="
+
+# 添加路由到 WireGuard 网络
+echo "Adding route to 10.20.0.0/24 via 10.10.0.3..."
+ip route add 10.20.0.0/24 via 10.10.0.3 2>/dev/null || true
+
+echo "Adding route to 10.30.0.0/24 via 10.10.0.3..."
+ip route add 10.30.0.0/24 via 10.10.0.3 2>/dev/null || true
+
+# 显示当前路由表
+echo "Current routing table:"
+ip route
+
+echo ""
+echo "Starting Nginx..."
+echo "==================================="
+
+exec /home/nginx/sbin/nginx -g "daemon off;"
+```
+
+```bash
+docker rmi gateway-nginx:1.0.0
+docker run -i -d \
+  --restart=always \
+  --net gateway-v2 --ip 10.10.0.2 \
+  --name nginx \
+  --cap-add=NET_ADMIN \
+  -v /root/files/nginx/html:/home/nginx/html \
+  -v /root/files/nginx/logs:/home/nginx/logs \
+  -v /root/files/nginx/confs:/home/nginx/confs \
+  -p 80:80 \
+  gateway-nginx:1.0.0
+```
+
+---
+
+### wireguard-server（wireguard-ui）
+
+WireGuard 也需要知道要将 `10.30.0.0/24` 转发给 `10.20.0.2`，因此也需要进行一些配置。
+
+这里仅展示核心部分（PostUp & PostDown）：
+
+```ini
+PostUp = iptables -A FORWARD -i wg0 -o eth0 -j ACCEPT; iptables -A FORWARD -i eth0 -o wg0 -j ACCEPT; ptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE;  ip route add 10.30.0.0/24 via 10.20.0.2 dev wg0; wg set wg0 peer [peer,这里需要替换] allowed-ips 10.20.0.2/32,10.30.0.0/24
+
+PreDown =
+PostDown = iptables -D FORWARD -i wg0 -o eth0 -j ACCEPT; iptables -D FORWARD -i eth0 -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE; ip route del 10.30.0.0/24 via 10.20.0.2 dev wg0
+
+Table = auto
+```
+
+---
+
+### NAS 物理机器
+
+这里是最坑的部分。之前使用 Podman 时没问题，但 Podman 有其他限制，所以换回了 Docker。
+
+Docker 默认有一些安全策略，不允许容器外 IP 直接访问容器（通过 iptables 实现）。如果直接关闭这个规则，会导致 WireGuard 无法正常连接。
+
+因此，需要在 **Docker 启动后再启动 WireGuard**，并在 `PostUp` / `PostDown` 中清理 Docker 的默认规则：
+
+这里的br-4476e974a10f,是我创建的自定义网桥，需要替换成自己的.
+
+```ini
+PostUp = iptables -t raw -F PREROUTING
+PostUp = iptables -F DOCKER
+PostUp = iptables -I DOCKER-USER 1 -i wg0 -o br-4476e974a10f -j ACCEPT
+PostUp = iptables -I DOCKER-USER 1 -i wg0 -o docker0 -j ACCEPT
+PostUp = iptables -t nat -A POSTROUTING -s 10.20.0.0/24 -o br-4476e974a10f -j MASQUERADE
+
+PostDown = iptables -D DOCKER-USER -i %i -o br-4476e974a10f -j ACCEPT
+PostDown = iptables -D DOCKER-USER -i %i -o docker0 -j ACCEPT
+PostDown = iptables -t nat -D POSTROUTING -s 10.20.0.0/24 -o br-4476e974a10f -j MASQUERADE
+```
+
+同时，需要确保 WireGuard 在 Docker 之后启动，并且当 Docker 重启后，WireGuard 也能自动重启。
+
+创建以下文件：
+
+```
+/etc/systemd/system/wg-quick@wg0.service.d/override.conf
+```
+
+若目录不存在，请先创建。
+
+内容如下：
+
+```ini
+[Unit]
+After=docker.service network-online.target
+Wants=docker.service
+PartOf=docker.service
+
+[Service]
+Restart=on-failure
+RestartSec=5
+```
+
+---
+
+至此，三层网络穿透已完成。
